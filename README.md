@@ -24,11 +24,13 @@ green test suite says nothing about it.
 
 This repository is being delivered slice by slice. Right now it contains the **secure**
 application — the fictional venue, the two-step booking flow, self-service registration, and the
-three flow limits that together constitute the fix — plus the **business-flow automation harness**
-that runs the flow at volume and reconciles who ended up with the seats.
+three flow limits that together constitute the fix — the **business-flow automation harness** that
+runs the flow at volume and reconciles who ended up with the seats, and the **vulnerable
+application** with no anti-automation at all.
 
-The vulnerable variants — the ladder of controls that *look* like fixes and are not — arrive in a
-later slice.
+The ladder of controls that *look* like fixes and are not — a per-source rate limit, a correct
+per-account quota defeated by manufactured identities, a verification gate on one step of the flow
+— and both negative controls arrive in a later slice.
 
 ## The fixture
 
@@ -100,6 +102,53 @@ a limit on the flow's outcome, which is the only thing that could have.
 Volume, pace, and concurrency are run parameters, not the mechanism. Concurrency exists purely to
 shorten the run: the same counts come out at concurrency 1, and the test suite asserts exactly that.
 
+## The vulnerable application
+
+Point the same harness at an application with no anti-automation and the same fixtures give a very
+different answer:
+
+| | secure | no anti-automation | abandoned holds |
+|---|---|---|---|
+| seats to the automated operator | 6 | **120** | **120** |
+| identities it needed | 3 | **1** | **1** |
+| seats confirmed | 86 | 120 | **0** |
+| seats to genuine patrons | 80 | **0** | **0** |
+| genuine demand served | 80 / 80 | **0 / 80** | **0 / 80** |
+| individually invalid requests | 0 | **0** | **0** |
+| verdict | flow limit held | flow limit absent | flow limit absent |
+
+Two things are worth sitting with.
+
+**One identity was enough.** Not a botnet, not stolen credentials — one registration, then the same
+flow 120 times. Every response `201`.
+
+**The third column never sold a ticket.** The operator holds every seat and simply never confirms,
+re-holding as each hold lapses. The allocation is denied just as completely with no purchase, no
+payment, and no transaction for a fraud control to look at. That is why the secure application's
+quota counts *outstanding holds* and why expiry does not hand entitlement back indefinitely — a
+limit that counted only confirmations would count the wrong event.
+
+Across all three columns the invalid-request count is zero.
+
+### Running it takes two deliberate actions
+
+The vulnerable application is not started by the default path. Reaching it requires **both**:
+
+1. the opt-in Compose profile: `--profile vulnerable`
+2. the explicit acknowledgement: `ALLOW_VULNERABLE_DEMO=true`
+
+With the profile but no acknowledgement, the container exits:
+
+```
+flowjack.vulnerable_app.VulnerableDemoNotAcknowledgedError: Refusing to start the
+deliberately vulnerable flowjack application. ... It is local educational material with no
+anti-automation on a sensitive business flow, and must never be deployed.
+```
+
+`scripts/verify.sh` takes both actions explicitly and visibly in its second phase. The gate sits on
+the deployable entry point rather than on `create_app`, so the regression suite can still pin what
+the vulnerable shapes do while the thing that can be *served* stays behind the acknowledgement.
+
 ## Run it
 
 The host needs **Docker and nothing else** — no Python, no database, no configuration:
@@ -150,14 +199,17 @@ src/flowjack/
   audit.py        the generic rejection event
   limits.py       strategy A (outcome quota) and strategy B (identity supply)
   flow.py         the two-step flow and strategy C (flow-scoped enforcement)
+  policy.py       which flow limits are in force — the vulnerable variants are subsets
   app.py          the application factory
   secure_app.py   the secure ASGI entry point
+  vulnerable_app.py  the gated vulnerable entry point (two opt-in actions)
   walkthrough.py  the HTTP walkthrough
   harness/
     fixtures.py   the fixed, checked-in identities and source labels
     records.py    one record per request, and what the application did with it
     engine.py     the flow run at volume — a callable, tested directly
     ledger.py     who ended up with the seats, and the flow-limit verdict
+    scenarios.py  named runs shared by the CLI and the regression suite
     transcript.py the run artifact
 tests/            in-process tests over the real HTTP surface, on a controllable clock
 ```

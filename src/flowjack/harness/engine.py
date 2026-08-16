@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from enum import StrEnum
 from threading import Lock
 from typing import Any, Protocol
 
@@ -57,9 +58,21 @@ class Client(Protocol):
     ) -> Response: ...
 
 
+class Mode(StrEnum):
+    """What the operator does with the flow."""
+
+    #: Run the flow to completion: hold, then confirm. Seats change hands.
+    ACQUIRE = "acquire"
+    #: Hold and never confirm, re-holding as each hold lapses. No ticket is ever sold, no payment
+    #: is ever taken, and the allocation is denied all the same. Harm needs no transaction.
+    ABANDON = "abandon"
+
+
 @dataclass(frozen=True, slots=True)
 class HarnessConfig:
     """Volume, pace, and concurrency are run parameters. None of them is the mechanism."""
+
+    mode: Mode = Mode.ACQUIRE
 
     show_id: str = SHOW_ID
     #: How many identities the operator attempts to obtain.
@@ -76,6 +89,10 @@ class HarnessConfig:
     #: that staying under a rate limit changes only how long the harm takes.
     pace_seconds: float = 0.0
     source_labels: tuple[str, ...] = OPERATOR_SOURCE_LABELS
+    #: Abandon mode only: how many hold-and-lapse rounds to run, and how long to wait for a hold
+    #: to lapse between them.
+    abandon_rounds: int = 2
+    abandon_wait_seconds: float = 0.0
 
     @property
     def demand_offered(self) -> int:
@@ -116,15 +133,37 @@ def run_harness(
     client: Client,
     config: HarnessConfig | None = None,
     settings: Settings | None = None,
+    wait_for_expiry: Callable[[], None] | None = None,
 ) -> HarnessResult:
-    """Drive the whole flow at volume, then reconcile the venue's allocation."""
+    """Drive the whole flow at volume, then reconcile the venue's allocation.
+
+    ``wait_for_expiry`` is how abandon mode lets a hold lapse between rounds. It defaults to
+    sleeping :attr:`HarnessConfig.abandon_wait_seconds`; tests inject a clock advance instead, so
+    no test ever sleeps.
+    """
     resolved_config = config if config is not None else HarnessConfig()
     resolved_settings = settings if settings is not None else Settings()
     recorder = _Recorder()
 
+    def default_wait() -> None:
+        if resolved_config.abandon_wait_seconds:
+            time.sleep(resolved_config.abandon_wait_seconds)
+
+    wait = wait_for_expiry if wait_for_expiry is not None else default_wait
+
     # The operator runs first. That is the honest worst case: automation reaches the flow before a
     # person does, which is exactly the situation a flow limit has to survive.
-    _run_operator(client, resolved_config, recorder)
+    #
+    # Identities are obtained once. Abandon mode then re-runs only the *holding*, with the same
+    # identities, because that is the shape: one actor letting its own holds lapse and immediately
+    # taking them back.
+    identities = _obtain_operator_identities(client, resolved_config, recorder)
+    rounds = resolved_config.abandon_rounds if resolved_config.mode is Mode.ABANDON else 1
+    for round_index in range(rounds):
+        if round_index:
+            wait()
+        _run_operator_seats(client, resolved_config, recorder, identities)
+
     _run_genuine_demand(client, resolved_config, recorder)
 
     allocation = client.get(f"/shows/{resolved_config.show_id}/allocation").json()
@@ -138,17 +177,29 @@ def run_harness(
     return HarnessResult(records=records, ledger=ledger)
 
 
-def _run_operator(client: Client, config: HarnessConfig, recorder: _Recorder) -> None:
+@dataclass(frozen=True, slots=True)
+class _Identity:
+    """An identity the operator successfully obtained, and how it presents itself."""
+
+    patron_id: str
+    source_label: str
+    headers: dict[str, str]
+
+
+def _obtain_operator_identities(
+    client: Client, config: HarnessConfig, recorder: _Recorder
+) -> list[_Identity]:
+    """Run the identity-supply flow. What comes back is what the operator managed to buy."""
     candidates = OPERATOR_ELIGIBILITY_CANDIDATES[: config.operator_identities]
+    granted: list[_Identity] = []
+    granted_lock = Lock()
 
     def one_identity(index: int, eligibility_ref: str) -> None:
         source = config.source_labels[index % len(config.source_labels)]
-        headers = {SOURCE_HEADER: source}
-
         response = client.post(
             "/patrons",
             json={"display_name": f"Demo Operator {index:03d}", "eligibility_ref": eligibility_ref},
-            headers=headers,
+            headers={SOURCE_HEADER: source},
         )
         outcome = classify(response.status_code, refusal_status=REFUSAL_STATUS)
         recorder.add(
@@ -165,20 +216,38 @@ def _run_operator(client: Client, config: HarnessConfig, recorder: _Recorder) ->
             return
 
         body = response.json()
-        patron_id = str(body["patron_id"])
-        auth = {"Authorization": f"Bearer {body['token']}", SOURCE_HEADER: source}
+        identity = _Identity(
+            patron_id=str(body["patron_id"]),
+            source_label=source,
+            headers={"Authorization": f"Bearer {body['token']}", SOURCE_HEADER: source},
+        )
+        with granted_lock:
+            granted.append(identity)
+
+    _fan_out(config, list(enumerate(candidates)), one_identity)
+    return sorted(granted, key=lambda identity: identity.patron_id)
+
+
+def _run_operator_seats(
+    client: Client,
+    config: HarnessConfig,
+    recorder: _Recorder,
+    identities: list[_Identity],
+) -> None:
+    def one_identity(index: int, identity: _Identity) -> None:
+        del index
         _acquire_seats(
             client,
             config=config,
             recorder=recorder,
             actor=Actor.OPERATOR,
-            identity=patron_id,
-            source=source,
-            headers=auth,
+            identity=identity.patron_id,
+            source=identity.source_label,
+            headers=identity.headers,
             seats=config.operator_seats_per_identity,
         )
 
-    _fan_out(config, [(index, ref) for index, ref in enumerate(candidates)], one_identity)
+    _fan_out(config, list(enumerate(identities)), one_identity)
 
 
 def _run_genuine_demand(client: Client, config: HarnessConfig, recorder: _Recorder) -> None:
@@ -233,6 +302,9 @@ def _acquire_seats(
             )
         )
         if hold_outcome is not Outcome.GRANTED:
+            continue
+        if config.mode is Mode.ABANDON:
+            # The seat is claimed and nobody else can have it. Walking away here is the point.
             continue
 
         hold_id = str(hold.json()["hold_id"])

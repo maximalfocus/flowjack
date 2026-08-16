@@ -18,6 +18,7 @@ from flowjack.auth import demo_token
 from flowjack.clock import FakeClock
 from flowjack.config import Settings
 from flowjack.db import Database
+from flowjack.policy import SECURE, VULNERABLE_NONE, Policy
 
 AppFactory = Callable[..., TestClient]
 
@@ -36,11 +37,11 @@ def settings() -> Settings:
 def make_client(clock: FakeClock) -> Iterator[AppFactory]:
     created: list[Database] = []
 
-    def factory(**overrides: object) -> TestClient:
+    def factory(*, policy: Policy = SECURE, **overrides: object) -> TestClient:
         resolved = replace(Settings(), **overrides)  # type: ignore[arg-type]
         database = Database(resolved, clock)
         created.append(database)
-        app = create_app(settings=resolved, clock=clock, database=database)
+        app = create_app(settings=resolved, clock=clock, database=database, policy=policy)
         return TestClient(app, base_url="http://flowjack.test")
 
     yield factory
@@ -51,6 +52,14 @@ def make_client(clock: FakeClock) -> Iterator[AppFactory]:
 @pytest.fixture
 def client(make_client: AppFactory) -> Iterator[TestClient]:
     with make_client() as instance:
+        yield instance
+
+
+@pytest.fixture
+def vulnerable_client(make_client: AppFactory) -> Iterator[TestClient]:
+    """An application with no anti-automation, built through the library rather than the gated
+    entry point — the deployable service stays behind its acknowledgement."""
+    with make_client(policy=VULNERABLE_NONE) as instance:
         yield instance
 
 

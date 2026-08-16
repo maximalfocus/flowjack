@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# The one documented command. Brings up the secure application on a hermetic, egress-less
-# network, runs linters, types, the test suite, and the HTTP walkthrough inside that network,
-# then tears everything down. Nothing survives the run.
+# The one documented command. Brings everything up on a hermetic, egress-less network, runs
+# linters, types, the test suite, the HTTP walkthrough, and the automation harness inside that
+# network, then tears everything down. Nothing survives the run.
 #
 # Local verification and GitHub Actions invoke this identical boundary.
+#
+# The vulnerable application is started only in the second phase, and only because this script
+# takes BOTH deliberate opt-in actions explicitly and visibly:
+#
+#   1. --profile vulnerable
+#   2. ALLOW_VULNERABLE_DEMO=true
+#
+# The default `docker compose up` starts neither the vulnerable application nor anything that
+# talks to it.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
 
 cleanup() {
-  docker compose down --remove-orphans --volumes >/dev/null 2>&1 || true
+  docker compose --profile vulnerable down --remove-orphans --volumes >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -18,4 +27,10 @@ trap cleanup EXIT
 cleanup
 
 docker compose build
-docker compose run --rm --build verify
+
+echo "### phase 1 — secure application (the default path)"
+docker compose run --rm verify
+
+echo
+echo "### phase 2 — vulnerable application (opt-in profile + explicit acknowledgement)"
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable run --rm verify-vulnerable

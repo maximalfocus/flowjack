@@ -21,6 +21,7 @@ from flowjack.auth import Patron, demo_token
 from flowjack.config import Settings
 from flowjack.errors import FlowLimitRefusedError
 from flowjack.limits import expire_due_holds, require_identity_supply, require_seat_entitlement
+from flowjack.policy import Policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,19 +54,28 @@ def register_patron(
     conn: sqlite3.Connection,
     *,
     display_name: str,
-    eligibility_ref: str,
+    eligibility_ref: str | None,
     settings: Settings,
+    policy: Policy,
     now: float,
 ) -> RegistrationResult:
-    """Self-service registration, governed as a sensitive flow in its own right (strategy B)."""
-    require_identity_supply(
-        conn,
-        eligibility_ref=eligibility_ref,
-        registration_cap=settings.self_service_registration_cap,
-    )
+    """Self-service registration.
 
-    sequence = _next_sequence(conn, "SELECT COUNT(*) FROM registrations")
-    patron_id = f"PATRON-SS-{sequence:03d}"
+    Under :attr:`Policy.governed_identity_supply` this is a sensitive flow in its own right
+    (strategy B) and costs a single-use eligibility reference against a documented cap. Without it,
+    identities are free — and a per-account quota keyed on them is worth exactly what they cost.
+    """
+    if policy.governed_identity_supply:
+        require_identity_supply(
+            conn,
+            eligibility_ref=eligibility_ref or "",
+            registration_cap=settings.self_service_registration_cap,
+        )
+
+    sequence = _next_sequence(
+        conn, "SELECT COUNT(*) FROM patrons WHERE created_via = 'self_service'"
+    )
+    patron_id = f"PATRON-SS-{sequence:04d}"
     token = demo_token(patron_id)
 
     conn.execute(
@@ -77,15 +87,16 @@ def register_patron(
         "INSERT INTO tokens (token, patron_id, expires_at) VALUES (?, ?, ?)",
         (token, patron_id, now + 86_400.0),
     )
-    conn.execute(
-        "UPDATE eligibility_refs SET consumed_by = ? WHERE eligibility_ref = ?",
-        (patron_id, eligibility_ref),
-    )
-    conn.execute(
-        "INSERT INTO registrations (registration_id, patron_id, eligibility_ref, created_at)"
-        " VALUES (?, ?, ?, ?)",
-        (f"REG-{sequence:03d}", patron_id, eligibility_ref, now),
-    )
+    if policy.governed_identity_supply and eligibility_ref is not None:
+        conn.execute(
+            "UPDATE eligibility_refs SET consumed_by = ? WHERE eligibility_ref = ?",
+            (patron_id, eligibility_ref),
+        )
+        conn.execute(
+            "INSERT INTO registrations (registration_id, patron_id, eligibility_ref, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (f"REG-{sequence:04d}", patron_id, eligibility_ref, now),
+        )
 
     return RegistrationResult(
         patron_id=patron_id,
@@ -101,20 +112,22 @@ def place_hold(
     patron: Patron,
     show_id: str,
     settings: Settings,
+    policy: Policy,
     now: float,
 ) -> HoldResult:
-    """Flow step 1. Charged against the patron's seat entitlement (strategy A)."""
+    """Flow step 1. Charged against the patron's seat entitlement when strategy A is in force."""
     expire_due_holds(conn, now=now)
     _require_show(conn, show_id)
 
-    require_seat_entitlement(
-        conn,
-        patron_id=patron.patron_id,
-        show_id=show_id,
-        entitlement=patron.seat_entitlement,
-        rehold_allowance=settings.rehold_allowance,
-        step="hold",
-    )
+    if policy.seat_quota:
+        require_seat_entitlement(
+            conn,
+            patron_id=patron.patron_id,
+            show_id=show_id,
+            entitlement=patron.seat_entitlement,
+            rehold_allowance=settings.rehold_allowance,
+            step="hold",
+        )
 
     seat = conn.execute(
         "SELECT s.seat_id, s.seat_label FROM seats s"
@@ -158,9 +171,15 @@ def confirm_hold(
     *,
     patron: Patron,
     hold_id: str,
+    policy: Policy,
     now: float,
 ) -> TicketResult:
-    """Flow step 2. Refuses unless this identity's flow reached step 1 first (strategy C)."""
+    """Flow step 2.
+
+    Under :attr:`Policy.flow_state` this refuses unless *this* identity's flow reached step 1
+    first (strategy C). Without it, the step still needs a live hold to point at — but it does not
+    care who placed it, or whether the flow that placed it was ever entered.
+    """
     expire_due_holds(conn, now=now)
 
     state = conn.execute(
@@ -175,11 +194,10 @@ def confirm_hold(
 
     # No flow state: this request entered the flow at step 2. Wrong identity: this is somebody
     # else's flow. Wrong step: this flow is already finished. Lapsed hold: the claim is gone.
-    if (
-        state is None
-        or str(state["flow_patron"]) != patron.patron_id
-        or str(state["step"]) != "held"
-        or str(state["hold_state"]) != "held"
+    if state is None or str(state["hold_state"]) != "held":
+        raise FlowLimitRefusedError(step="confirm", patron_id=patron.patron_id)
+    if policy.flow_state and (
+        str(state["flow_patron"]) != patron.patron_id or str(state["step"]) != "held"
     ):
         raise FlowLimitRefusedError(step="confirm", patron_id=patron.patron_id)
 
