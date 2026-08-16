@@ -22,10 +22,19 @@ from flowjack.auth import UNAUTHORIZED_DETAIL, AuthenticationFailedError, Patron
 from flowjack.clock import Clock, SystemClock
 from flowjack.config import Settings, load_settings
 from flowjack.db import Database
-from flowjack.errors import REFUSAL_DETAIL, REFUSAL_STATUS, FlowLimitRefusedError
+from flowjack.errors import (
+    REFUSAL_DETAIL,
+    REFUSAL_STATUS,
+    VERIFICATION_REQUIRED_DETAIL,
+    VERIFICATION_REQUIRED_STATUS,
+    FlowLimitRefusedError,
+    RateLimitedError,
+    VerificationRequiredError,
+)
 from flowjack.flow import confirm_hold, place_hold, register_patron
 from flowjack.limits import expire_due_holds
 from flowjack.policy import SECURE, Policy
+from flowjack.ratelimit import RATE_LIMIT_DETAIL, RATE_LIMIT_STATUS, SourceRateLimiter
 from flowjack.schemas import (
     AllocationResponse,
     HoldResponse,
@@ -35,6 +44,7 @@ from flowjack.schemas import (
     ShowResponse,
     TicketResponse,
 )
+from flowjack.verification import VerificationChallenge
 
 
 def create_app(
@@ -58,10 +68,31 @@ def create_app(
         ),
         version="0.1.0",
     )
+    limiter = (
+        SourceRateLimiter(policy.per_source_rate_limit, policy.rate_limit_window_seconds)
+        if policy.per_source_rate_limit is not None
+        else None
+    )
+    challenge = VerificationChallenge()
+
     app.state.policy = policy
     app.state.settings = resolved_settings
     app.state.clock = resolved_clock
     app.state.db = db
+    app.state.rate_limiter = limiter
+    app.state.challenge = challenge
+
+    def enforce_rate_limit(source: str | None) -> None:
+        if limiter is None:
+            return
+        if not limiter.allow(source or "unlabelled", now=resolved_clock.now()):
+            raise RateLimitedError
+
+    def enforce_verification(step: str, token: str | None) -> None:
+        if step not in policy.verification_gate_steps:
+            return
+        if not challenge.spend(token):
+            raise VerificationRequiredError
 
     counter = itertools.count(1)
     counter_lock = threading.Lock()
@@ -86,6 +117,28 @@ def create_app(
     async def handle_auth_failure(_: Request, __: AuthenticationFailedError) -> JSONResponse:
         return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
 
+    @app.exception_handler(RateLimitedError)
+    async def handle_rate_limited(_: Request, __: RateLimitedError) -> JSONResponse:
+        return JSONResponse(status_code=RATE_LIMIT_STATUS, content={"detail": RATE_LIMIT_DETAIL})
+
+    @app.exception_handler(VerificationRequiredError)
+    async def handle_verification_required(
+        _: Request, __: VerificationRequiredError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=VERIFICATION_REQUIRED_STATUS,
+            content={"detail": VERIFICATION_REQUIRED_DETAIL},
+        )
+
+    @app.get("/verification/challenge")
+    def get_challenge() -> dict[str, str]:
+        """Issue one single-use verification token.
+
+        A stand-in for the cost a challenge imposes on a person, once. The demo does not implement
+        a challenge and does not defeat one; see :mod:`flowjack.verification`.
+        """
+        return {"token": challenge.issue()}
+
     def current_patron(authorization: str | None = Header(default=None)) -> Patron:
         with db.transaction() as conn:
             return authenticate(conn, authorization, now=resolved_clock.now())
@@ -95,7 +148,13 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/patrons", response_model=RegistrationResponse, status_code=201)
-    def post_patrons(body: RegistrationRequest) -> RegistrationResponse:
+    def post_patrons(
+        body: RegistrationRequest,
+        x_demo_source: str | None = Header(default=None),
+        x_human_verification: str | None = Header(default=None),
+    ) -> RegistrationResponse:
+        enforce_rate_limit(x_demo_source)
+        enforce_verification("register", x_human_verification)
         with db.transaction() as conn:
             result = register_patron(
                 conn,
@@ -113,7 +172,14 @@ def create_app(
         )
 
     @app.post("/shows/{show_id}/holds", response_model=HoldResponse, status_code=201)
-    def post_hold(show_id: str, patron: Patron = Depends(current_patron)) -> HoldResponse:
+    def post_hold(
+        show_id: str,
+        patron: Patron = Depends(current_patron),
+        x_demo_source: str | None = Header(default=None),
+        x_human_verification: str | None = Header(default=None),
+    ) -> HoldResponse:
+        enforce_rate_limit(x_demo_source)
+        enforce_verification("hold", x_human_verification)
         with db.transaction() as conn:
             result = place_hold(
                 conn,
@@ -132,7 +198,14 @@ def create_app(
         )
 
     @app.post("/holds/{hold_id}/confirm", response_model=TicketResponse, status_code=201)
-    def post_confirm(hold_id: str, patron: Patron = Depends(current_patron)) -> TicketResponse:
+    def post_confirm(
+        hold_id: str,
+        patron: Patron = Depends(current_patron),
+        x_demo_source: str | None = Header(default=None),
+        x_human_verification: str | None = Header(default=None),
+    ) -> TicketResponse:
+        enforce_rate_limit(x_demo_source)
+        enforce_verification("confirm", x_human_verification)
         with db.transaction() as conn:
             result = confirm_hold(
                 conn,

@@ -30,9 +30,10 @@ import os
 from fastapi import FastAPI
 
 from flowjack.app import create_app
-from flowjack.policy import VULNERABLE_NONE, Policy
+from flowjack.policy import VULNERABLE_NONE, VULNERABLE_POLICIES, Policy
 
 ACKNOWLEDGEMENT_ENV = "ALLOW_VULNERABLE_DEMO"
+POLICY_ENV = "FLOWJACK_POLICY"
 
 _REFUSAL = (
     "Refusing to start the deliberately vulnerable flowjack application.\n"
@@ -46,11 +47,33 @@ class VulnerableDemoNotAcknowledgedError(RuntimeError):
     """Raised when the vulnerable entry point is started without the explicit acknowledgement."""
 
 
+class UnknownVulnerableShapeError(RuntimeError):
+    """Raised when FLOWJACK_POLICY names something that is not a vulnerable shape."""
+
+
 def acknowledged() -> bool:
     return os.environ.get(ACKNOWLEDGEMENT_ENV, "").strip().lower() == "true"
 
 
-def create_vulnerable_app(policy: Policy = VULNERABLE_NONE) -> FastAPI:
+def selected_policy() -> Policy:
+    """Read the vulnerable shape from ``FLOWJACK_POLICY``.
+
+    Only a vulnerable shape may be selected here. Asking this entry point for the secure
+    application is a configuration mistake, not a shortcut, and is refused.
+    """
+    name = os.environ.get(POLICY_ENV, "").strip()
+    if not name:
+        return VULNERABLE_NONE
+    for policy in VULNERABLE_POLICIES:
+        if policy.name == name:
+            return policy
+    known = ", ".join(policy.name for policy in VULNERABLE_POLICIES)
+    raise UnknownVulnerableShapeError(
+        f"{POLICY_ENV}={name!r} is not a vulnerable shape. Known shapes: {known}."
+    )
+
+
+def create_vulnerable_app(policy: Policy | None = None) -> FastAPI:
     if not acknowledged():
         raise VulnerableDemoNotAcknowledgedError(_REFUSAL)
-    return create_app(policy=policy)
+    return create_app(policy=policy if policy is not None else selected_policy())

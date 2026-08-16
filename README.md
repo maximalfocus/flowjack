@@ -25,12 +25,10 @@ green test suite says nothing about it.
 This repository is being delivered slice by slice. Right now it contains the **secure**
 application — the fictional venue, the two-step booking flow, self-service registration, and the
 three flow limits that together constitute the fix — the **business-flow automation harness** that
-runs the flow at volume and reconciles who ended up with the seats, and the **vulnerable
-application** with no anti-automation at all.
+runs the flow at volume and reconciles who ended up with the seats, the **vulnerable application**
+in all four of its shapes, and both **negative controls**.
 
-The ladder of controls that *look* like fixes and are not — a per-source rate limit, a correct
-per-account quota defeated by manufactured identities, a verification gate on one step of the flow
-— and both negative controls arrive in a later slice.
+The comparison CLI and the educational walkthrough arrive in a later slice.
 
 ## The fixture
 
@@ -130,12 +128,71 @@ limit that counted only confirmations would count the wrong event.
 
 Across all three columns the invalid-request count is zero.
 
+## Three controls that look like fixes
+
+Each of these is a real, correctly implemented, genuinely enforced control. Each of them holds
+perfectly. Each of them watches the allocation drain.
+
+| control | did it hold? | the evidence | seats the operator got |
+|---|---|---|---|
+| **per-source rate limit** | yes, perfectly | **0** requests refused by it | **120 / 120** |
+| **per-account quota** (2 seats) | yes, perfectly | **0** violations; most seats by any one identity: **2** | **120 / 120** |
+| **verification gate** at the front door | yes, perfectly | **1** challenge passed, legitimately | **120 / 120** |
+
+**The rate limit** was never once exceeded. The operator spread the identical flow across eight
+source labels, each comfortably under the limit. The limiter counts *requests per source*; the
+business cares about *outcomes per person*; and the attacker picks the source. (A separate test
+hammers one source past the limit and watches it refuse, so the limiter is provably not a stub.)
+
+**The quota** is the one to look hardest at, because it is *correct*. It is expressed in business
+terms, it is enforced server-side, and no identity ever held more than its two seats. It was keyed
+on an identity that cost nothing — so sixty were brought. A limit keyed on an identity is a limit on
+how cheaply that identity can be obtained, and registration was itself an unprotected sensitive
+flow. Fixing this is not a better quota; it is `governed_identity_supply`.
+
+**The gate** was paid once. Nothing here defeats, solves, replays, or machine-answers a challenge —
+and the finding does not depend on how hard the challenge is. Even one nobody could beat, paid once,
+buys every unchallenged request behind it. A gate prices *entry*; it says nothing about how much
+flow one entry may go on to consume.
+
+## Two things this is not
+
+**It is not a race.** Run the identical automation at concurrency **1**, one identity, one source,
+paced deliberately *below* the enforced rate limit, and it still takes all 120 seats — just more
+slowly. Nothing in this demo depends on simultaneity, interleaving, or scheduling. Throttling
+changed how long the harm took and nothing else. The series' demonstration of the concurrency defect
+this class is repeatedly mistaken for is [`racejack`](https://github.com/maximalfocus/racejack)
+(CWE-367).
+
+**It is not something a request-level control could have caught.** Every run ends by replaying its
+captured requests through a per-request validity check — authentication, authorization, schema,
+every per-request rule in force — and reports the proportion that pass. In all seven scenarios,
+against every shape, the answer is the same:
+
+```
+request-level validity replay
+-----------------------------
+  requests replayed            : 321
+  individually VALID           : 321  (100.0%)
+  individually INVALID         : 0
+  every request in this run was individually valid — a request-level control had nothing to key on
+```
+
+The check is deliberately conservative: a request refused for want of a verification token counts as
+*invalid*, so the 100% is never reached by defining the problem away. And a control that stopped
+this attack by refusing the household patron's legitimate four-seat booking would have failed twice
+over — so that booking is asserted to keep succeeding.
+
 ### Running it takes two deliberate actions
 
 The vulnerable application is not started by the default path. Reaching it requires **both**:
 
 1. the opt-in Compose profile: `--profile vulnerable`
 2. the explicit acknowledgement: `ALLOW_VULNERABLE_DEMO=true`
+
+Which shape a vulnerable instance serves is chosen by `FLOWJACK_POLICY`; only a vulnerable shape may
+be named there, and asking that entry point for the secure application is refused as a configuration
+mistake.
 
 With the profile but no acknowledgement, the container exits:
 
@@ -200,6 +257,8 @@ src/flowjack/
   limits.py       strategy A (outcome quota) and strategy B (identity supply)
   flow.py         the two-step flow and strategy C (flow-scoped enforcement)
   policy.py       which flow limits are in force — the vulnerable variants are subsets
+  ratelimit.py    a real per-source request limiter (not a flow limit, and not a stub)
+  verification.py a single-use challenge token — never defeated, only paid
   app.py          the application factory
   secure_app.py   the secure ASGI entry point
   vulnerable_app.py  the gated vulnerable entry point (two opt-in actions)
@@ -210,6 +269,7 @@ src/flowjack/
     engine.py     the flow run at volume — a callable, tested directly
     ledger.py     who ended up with the seats, and the flow-limit verdict
     scenarios.py  named runs shared by the CLI and the regression suite
+    validity.py   the request-level validity replay
     transcript.py the run artifact
 tests/            in-process tests over the real HTTP surface, on a controllable clock
 ```

@@ -26,7 +26,15 @@ OPERATOR_SOURCE_LABELS: tuple[str, ...] = (
     "src-hotel",
 )
 
-GENUINE_SOURCE_LABEL = "src-public"
+#: Genuine patrons are individual people on individual connections, so each gets its own source
+#: label. Clustering them behind one label would throttle the public under a per-source limit and
+#: muddy a demonstration that is about the operator, not about the crowd.
+GENUINE_SOURCE_PREFIX = "src-public"
+
+
+def genuine_source_label(patron_id: str) -> str:
+    return f"{GENUINE_SOURCE_PREFIX}-{patron_id.rsplit('-', 1)[-1].lower()}"
+
 
 #: Eligibility references the operator presents when registering. The first four are the ones the
 #: venue actually issued; the rest are invented and must be refused. Sixty candidates in total,

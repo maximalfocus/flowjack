@@ -30,13 +30,14 @@ from flowjack.errors import REFUSAL_STATUS
 from flowjack.harness.fixtures import (
     GENUINE_PATRON_IDS,
     GENUINE_SEATS_EACH,
-    GENUINE_SOURCE_LABEL,
     OPERATOR_ELIGIBILITY_CANDIDATES,
     OPERATOR_SOURCE_LABELS,
     SOURCE_HEADER,
+    genuine_source_label,
 )
 from flowjack.harness.ledger import Ledger, build_ledger
 from flowjack.harness.records import Actor, Outcome, RequestRecord, Step, classify
+from flowjack.verification import VERIFICATION_HEADER
 
 
 class Response(Protocol):
@@ -85,9 +86,12 @@ class HarnessConfig:
     genuine_seats_each: int = GENUINE_SEATS_EACH
     #: Threads used to shorten the run. Not part of the demonstrated mechanism.
     concurrency: int = 8
-    #: Seconds to wait between an identity's requests. Used by the later negative control to show
-    #: that staying under a rate limit changes only how long the harm takes.
+    #: Seconds to wait before **each** request an identity issues. The negative control uses this
+    #: to stay deliberately under an enforced rate limit and drain the allocation anyway.
     pace_seconds: float = 0.0
+    #: Obtain a human-verification token before registering. Nothing here defeats, solves, replays,
+    #: or machine-answers a challenge; the harness simply pays it, once per registration attempt.
+    pass_verification: bool = False
     source_labels: tuple[str, ...] = OPERATOR_SOURCE_LABELS
     #: Abandon mode only: how many hold-and-lapse rounds to run, and how long to wait for a hold
     #: to lapse between them.
@@ -133,23 +137,18 @@ def run_harness(
     client: Client,
     config: HarnessConfig | None = None,
     settings: Settings | None = None,
-    wait_for_expiry: Callable[[], None] | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> HarnessResult:
     """Drive the whole flow at volume, then reconcile the venue's allocation.
 
-    ``wait_for_expiry`` is how abandon mode lets a hold lapse between rounds. It defaults to
-    sleeping :attr:`HarnessConfig.abandon_wait_seconds`; tests inject a clock advance instead, so
-    no test ever sleeps.
+    ``sleep`` is every place this harness lets time pass — pacing between requests, and waiting for
+    a hold to lapse in abandon mode. It defaults to :func:`time.sleep`; tests inject a clock advance
+    instead, so no test ever sleeps and every count stays exactly reproducible.
     """
     resolved_config = config if config is not None else HarnessConfig()
     resolved_settings = settings if settings is not None else Settings()
     recorder = _Recorder()
-
-    def default_wait() -> None:
-        if resolved_config.abandon_wait_seconds:
-            time.sleep(resolved_config.abandon_wait_seconds)
-
-    wait = wait_for_expiry if wait_for_expiry is not None else default_wait
+    rest = sleep if sleep is not None else time.sleep
 
     # The operator runs first. That is the honest worst case: automation reaches the flow before a
     # person does, which is exactly the situation a flow limit has to survive.
@@ -157,14 +156,16 @@ def run_harness(
     # Identities are obtained once. Abandon mode then re-runs only the *holding*, with the same
     # identities, because that is the shape: one actor letting its own holds lapse and immediately
     # taking them back.
-    identities = _obtain_operator_identities(client, resolved_config, recorder)
+    identities, challenges_passed = _obtain_operator_identities(
+        client, resolved_config, recorder, rest
+    )
     rounds = resolved_config.abandon_rounds if resolved_config.mode is Mode.ABANDON else 1
     for round_index in range(rounds):
-        if round_index:
-            wait()
-        _run_operator_seats(client, resolved_config, recorder, identities)
+        if round_index and resolved_config.abandon_wait_seconds:
+            rest(resolved_config.abandon_wait_seconds)
+        _run_operator_seats(client, resolved_config, recorder, identities, rest)
 
-    _run_genuine_demand(client, resolved_config, recorder)
+    _run_genuine_demand(client, resolved_config, recorder, rest)
 
     allocation = client.get(f"/shows/{resolved_config.show_id}/allocation").json()
     records = recorder.sorted_records()
@@ -173,6 +174,7 @@ def run_harness(
         allocation=allocation,
         operator_ceiling=resolved_settings.operator_seat_ceiling,
         demand_offered=resolved_config.demand_offered,
+        challenges_passed=challenges_passed,
     )
     return HarnessResult(records=records, ledger=ledger)
 
@@ -187,19 +189,37 @@ class _Identity:
 
 
 def _obtain_operator_identities(
-    client: Client, config: HarnessConfig, recorder: _Recorder
-) -> list[_Identity]:
+    client: Client,
+    config: HarnessConfig,
+    recorder: _Recorder,
+    rest: Callable[[float], None],
+) -> tuple[list[_Identity], int]:
     """Run the identity-supply flow. What comes back is what the operator managed to buy."""
     candidates = OPERATOR_ELIGIBILITY_CANDIDATES[: config.operator_identities]
     granted: list[_Identity] = []
     granted_lock = Lock()
+    challenges = 0
 
     def one_identity(index: int, eligibility_ref: str) -> None:
         source = config.source_labels[index % len(config.source_labels)]
+        headers = {SOURCE_HEADER: source}
+
+        if config.pass_verification:
+            # Pay the challenge. Once, legitimately, exactly as a person would — the demo neither
+            # implements a challenge nor defeats one.
+            issued = client.get("/verification/challenge")
+            if issued.status_code == 200:
+                headers[VERIFICATION_HEADER] = str(issued.json()["token"])
+                with granted_lock:
+                    nonlocal challenges
+                    challenges += 1
+
+        if config.pace_seconds:
+            rest(config.pace_seconds)
         response = client.post(
             "/patrons",
             json={"display_name": f"Demo Operator {index:03d}", "eligibility_ref": eligibility_ref},
-            headers={SOURCE_HEADER: source},
+            headers=headers,
         )
         outcome = classify(response.status_code, refusal_status=REFUSAL_STATUS)
         recorder.add(
@@ -225,7 +245,7 @@ def _obtain_operator_identities(
             granted.append(identity)
 
     _fan_out(config, list(enumerate(candidates)), one_identity)
-    return sorted(granted, key=lambda identity: identity.patron_id)
+    return sorted(granted, key=lambda identity: identity.patron_id), challenges
 
 
 def _run_operator_seats(
@@ -233,6 +253,7 @@ def _run_operator_seats(
     config: HarnessConfig,
     recorder: _Recorder,
     identities: list[_Identity],
+    rest: Callable[[float], None],
 ) -> None:
     def one_identity(index: int, identity: _Identity) -> None:
         del index
@@ -245,19 +266,23 @@ def _run_operator_seats(
             source=identity.source_label,
             headers=identity.headers,
             seats=config.operator_seats_per_identity,
+            rest=rest,
         )
 
     _fan_out(config, list(enumerate(identities)), one_identity)
 
 
-def _run_genuine_demand(client: Client, config: HarnessConfig, recorder: _Recorder) -> None:
+def _run_genuine_demand(
+    client: Client, config: HarnessConfig, recorder: _Recorder, rest: Callable[[float], None]
+) -> None:
     patrons = GENUINE_PATRON_IDS[: config.genuine_patrons]
 
     def one_patron(index: int, patron_id: str) -> None:
         del index
+        source = genuine_source_label(patron_id)
         headers = {
             "Authorization": f"Bearer {demo_token(patron_id)}",
-            SOURCE_HEADER: GENUINE_SOURCE_LABEL,
+            SOURCE_HEADER: source,
         }
         _acquire_seats(
             client,
@@ -265,9 +290,10 @@ def _run_genuine_demand(client: Client, config: HarnessConfig, recorder: _Record
             recorder=recorder,
             actor=Actor.GENUINE,
             identity=patron_id,
-            source=GENUINE_SOURCE_LABEL,
+            source=source,
             headers=headers,
             seats=config.genuine_seats_each,
+            rest=rest,
         )
 
     _fan_out(config, list(enumerate(patrons)), one_patron)
@@ -283,11 +309,16 @@ def _acquire_seats(
     source: str,
     headers: Mapping[str, str],
     seats: int,
+    rest: Callable[[float], None],
 ) -> None:
-    """Run the two-step flow ``seats`` times for one identity."""
+    """Run the two-step flow ``seats`` times for one identity.
+
+    Pacing applies before *every* request, so a configured pace is a genuine per-request rate the
+    negative control can hold below an enforced limit.
+    """
     for _ in range(seats):
         if config.pace_seconds:
-            time.sleep(config.pace_seconds)
+            rest(config.pace_seconds)
 
         hold = client.post(f"/shows/{config.show_id}/holds", headers=headers)
         hold_outcome = classify(hold.status_code, refusal_status=REFUSAL_STATUS)
@@ -308,6 +339,8 @@ def _acquire_seats(
             continue
 
         hold_id = str(hold.json()["hold_id"])
+        if config.pace_seconds:
+            rest(config.pace_seconds)
         confirm = client.post(f"/holds/{hold_id}/confirm", headers=headers)
         recorder.add(
             RequestRecord(
