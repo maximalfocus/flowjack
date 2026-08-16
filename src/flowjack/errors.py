@@ -22,6 +22,28 @@ REFUSAL_DETAIL: Final = "This request could not be completed."
 REFUSAL_STATUS: Final = 409
 
 
+#: A verification challenge is required. Distinct from a flow-limit refusal on purpose: this is a
+#: conventional, advertised control that tells the caller exactly what to go and do.
+VERIFICATION_REQUIRED_STATUS: Final = 403
+VERIFICATION_REQUIRED_DETAIL: Final = "Human verification is required for this step."
+
+
+class RateLimitedError(Exception):
+    """A per-source request rate limit declined this request.
+
+    Not a flow limit. It is here so the demonstration can show one holding perfectly while the
+    allocation drains past it.
+    """
+
+
+class VerificationRequiredError(Exception):
+    """A verification gate declined this request for want of a token.
+
+    Nothing in this project attempts to defeat, solve, replay, or machine-answer the token. The
+    shape being demonstrated is *where* the gate sits, not how strong it is.
+    """
+
+
 class FlowLimitRefusedError(Exception):
     """A flow limit declined this request.
 

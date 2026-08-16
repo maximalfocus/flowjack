@@ -82,6 +82,34 @@ services:
   vulnerable-app: *vulnerable-app
   vulnerable-app-abandon: *vulnerable-app
 
+  vulnerable-app-rate-limit:
+    <<: *vulnerable-app
+    environment:
+      FLOWJACK_HOLD_TTL_SECONDS: "3"
+      ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+      FLOWJACK_POLICY: per-source-rate-limit
+
+  vulnerable-app-quota:
+    <<: *vulnerable-app
+    environment:
+      FLOWJACK_HOLD_TTL_SECONDS: "3"
+      ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+      FLOWJACK_POLICY: per-account-quota
+
+  vulnerable-app-gate:
+    <<: *vulnerable-app
+    environment:
+      FLOWJACK_HOLD_TTL_SECONDS: "3"
+      ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+      FLOWJACK_POLICY: front-door-gate
+
+  vulnerable-app-sequential:
+    <<: *vulnerable-app
+    environment:
+      FLOWJACK_HOLD_TTL_SECONDS: "3"
+      ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+      FLOWJACK_POLICY: per-source-rate-limit
+
   # One-shot verification of the secure side: linters, types, the test suite, the HTTP
   # walkthrough, and the automation harness.
   verify:
@@ -136,6 +164,14 @@ services:
         condition: service_healthy
       vulnerable-app-abandon:
         condition: service_healthy
+      vulnerable-app-rate-limit:
+        condition: service_healthy
+      vulnerable-app-quota:
+        condition: service_healthy
+      vulnerable-app-gate:
+        condition: service_healthy
+      vulnerable-app-sequential:
+        condition: service_healthy
     environment:
       ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
     command:
@@ -154,4 +190,24 @@ services:
           --base-url http://vulnerable-app-abandon:8000 \
           --scenario abandoned-holds \
           --abandon-wait-seconds 4 \
+          --expect "flow limit absent"
+        echo "== harness: per-source rate limit (FR-014) =="
+        python -m flowjack.harness \
+          --base-url http://vulnerable-app-rate-limit:8000 \
+          --scenario per-source-rate-limit \
+          --expect "flow limit absent"
+        echo "== harness: per-account quota, manufactured identities (FR-015) =="
+        python -m flowjack.harness \
+          --base-url http://vulnerable-app-quota:8000 \
+          --scenario per-account-quota \
+          --expect "flow limit absent"
+        echo "== harness: verification gate at the front door (FR-016) =="
+        python -m flowjack.harness \
+          --base-url http://vulnerable-app-gate:8000 \
+          --scenario front-door-gate \
+          --expect "flow limit absent"
+        echo "== NEGATIVE CONTROL: slow and sequential, under every limit (FR-017) =="
+        python -m flowjack.harness \
+          --base-url http://vulnerable-app-sequential:8000 \
+          --scenario slow-and-sequential \
           --expect "flow limit absent"

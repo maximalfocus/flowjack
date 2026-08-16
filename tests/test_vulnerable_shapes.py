@@ -7,6 +7,8 @@ no bad request to find, so no request-level control can find one.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -71,8 +73,8 @@ def test_abandoned_holds_deny_the_allocation_without_selling_a_ticket(
     """`FR-013` — harm with no completed transaction anywhere."""
     ledger = run_harness(
         vulnerable_client,
-        ABANDONED_HOLDS,
-        wait_for_expiry=lambda: clock.advance(601.0),
+        replace(ABANDONED_HOLDS, abandon_wait_seconds=601.0),
+        sleep=clock.advance,
     ).require_ledger()
 
     assert ledger.seats_confirmed == 0
@@ -91,8 +93,8 @@ def test_abandoned_holds_survive_expiry_by_re_holding(
     """Letting a hold lapse buys the venue nothing when the operator simply holds again."""
     result = run_harness(
         vulnerable_client,
-        ABANDONED_HOLDS,
-        wait_for_expiry=lambda: clock.advance(601.0),
+        replace(ABANDONED_HOLDS, abandon_wait_seconds=601.0),
+        sleep=clock.advance,
     )
     holds = [record for record in result.records if record.step.value == "hold"]
 

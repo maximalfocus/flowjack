@@ -42,6 +42,17 @@ class Ledger:
     status_distribution: dict[int, int]
     invalid_requests: int
 
+    #: Requests the per-source rate limiter declined. Zero in every demonstration run: the operator
+    #: stays under the limit, which is the finding, not an accident.
+    rate_limited_requests: int
+    #: Verification challenges the operator passed. Read it against ``operator_seats``.
+    challenges_passed: int
+    #: The largest number of seats any one identity holds — how a correct quota can hold perfectly
+    #: while the allocation drains.
+    max_seats_per_identity: int
+    #: Requests the operator issued from each source label.
+    requests_by_source: dict[str, int]
+
     @property
     def verdict(self) -> str:
         bounded = self.operator_seats <= self.operator_ceiling
@@ -65,6 +76,9 @@ class Ledger:
         statuses = "  ".join(
             f"{status}x{count}" for status, count in sorted(self.status_distribution.items())
         )
+        sources = "  ".join(
+            f"{label}={count}" for label, count in sorted(self.requests_by_source.items())
+        )
         return "\n".join(
             [
                 "allocation ledger",
@@ -86,6 +100,10 @@ class Ledger:
                 f"  requests issued              : {self.requests_issued}",
                 f"    status distribution        : {statuses}",
                 f"    individually INVALID       : {self.invalid_requests}",
+                f"    refused by RATE LIMIT      : {self.rate_limited_requests}",
+                f"    verification challenges    : {self.challenges_passed}",
+                f"    most seats by one identity : {self.max_seats_per_identity}",
+                f"    operator requests / source : {sources}",
                 "",
                 f"  VERDICT                      : {self.verdict}",
                 f"  {self.conclusion}",
@@ -99,6 +117,7 @@ def build_ledger(
     allocation: dict[str, object],
     operator_ceiling: int,
     demand_offered: int,
+    challenges_passed: int = 0,
 ) -> Ledger:
     """Reconcile per-request records against the venue's own report of its allocation."""
     holdings = allocation["holdings"]
@@ -127,6 +146,10 @@ def build_ledger(
         and record.step is Step.CONFIRM
     )
 
+    per_identity: list[int] = []
+    for holding in holdings:
+        per_identity.append(int(holding["seats_held"]) + int(holding["seats_confirmed"]))
+
     return Ledger(
         seats_allocated=_as_int(allocation["seats_allocated"]),
         seats_held=_as_int(allocation["seats_held"]),
@@ -142,6 +165,14 @@ def build_ledger(
         requests_issued=len(records),
         status_distribution=dict(Counter(record.status for record in records)),
         invalid_requests=sum(1 for record in records if record.individually_invalid),
+        rate_limited_requests=sum(
+            1 for record in records if record.outcome is Outcome.REFUSED_BY_RATE_LIMIT
+        ),
+        challenges_passed=challenges_passed,
+        max_seats_per_identity=max(per_identity, default=0),
+        requests_by_source=dict(
+            Counter(record.source_label for record in records if record.actor is Actor.OPERATOR)
+        ),
     )
 
 

@@ -7,6 +7,7 @@ runs on the real clock with a deliberately short hold window.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Protocol
 
@@ -24,13 +25,21 @@ class SystemClock:
 
 
 class FakeClock:
-    """Controllable time. Used by tests so no test ever sleeps."""
+    """Controllable time. Used by tests so no test ever sleeps.
+
+    Guarded by a lock because the harness paces from several threads at once, and a lost update
+    here would make time appear to stand still — which would change results rather than merely
+    slow them.
+    """
 
     def __init__(self, start: float = 1_800_000_000.0) -> None:
         self._now = start
+        self._lock = threading.Lock()
 
     def now(self) -> float:
-        return self._now
+        with self._lock:
+            return self._now
 
     def advance(self, seconds: float) -> None:
-        self._now += seconds
+        with self._lock:
+            self._now += seconds

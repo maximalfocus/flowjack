@@ -21,7 +21,7 @@ from flowjack.harness import (
     run_harness,
 )
 from flowjack.harness.fixtures import (
-    GENUINE_SOURCE_LABEL,
+    GENUINE_SOURCE_PREFIX,
     OPERATOR_SOURCE_LABELS,
     SOURCE_HEADER,
 )
@@ -129,7 +129,11 @@ def test_records_carry_identity_source_step_status_and_outcome(client: TestClien
 
     operator_sources = {r.source_label for r in records if r.actor is Actor.OPERATOR}
     assert operator_sources <= set(OPERATOR_SOURCE_LABELS)
-    assert {r.source_label for r in records if r.actor is Actor.GENUINE} == {GENUINE_SOURCE_LABEL}
+    genuine_sources = {r.source_label for r in records if r.actor is Actor.GENUINE}
+    assert genuine_sources
+    assert all(label.startswith(GENUINE_SOURCE_PREFIX) for label in genuine_sources)
+    # One label per patron: forty people on forty connections, not a crowd behind one address.
+    assert len(genuine_sources) == len({r.identity for r in records if r.actor is Actor.GENUINE})
 
 
 def test_the_operator_distributes_across_every_source_label(client: TestClient) -> None:
