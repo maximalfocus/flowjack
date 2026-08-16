@@ -186,9 +186,10 @@ exactly reproducible on every machine, and the suite asserts the same numbers at
 > Throttling changed how long the harm took, and **nothing else**. Reducing the rate of a flow is not
 > a limit on its outcome.
 
-The series' demonstration of the concurrency defect this class is repeatedly mistaken for is
-[`racejack`](https://github.com/maximalfocus/racejack) (CWE-367 / CWE-362), where simultaneity *is*
-the mechanism. The two look similar in a summary and need completely different fixes.
+The defect this class is repeatedly mistaken for is the check-then-act race (`CWE-367` / `CWE-362`),
+where simultaneity *is* the mechanism and serialising the requests is the fix — the subject of a
+separate demonstration in this series, `racejack`. The two look similar in a summary and need
+completely different fixes: here, serialising the requests changes nothing.
 
 ### There was no malicious request to find
 

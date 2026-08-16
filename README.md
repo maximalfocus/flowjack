@@ -22,13 +22,11 @@ green test suite says nothing about it.
 
 ## What is here today
 
-This repository is being delivered slice by slice. Right now it contains the **secure**
-application — the fictional venue, the two-step booking flow, self-service registration, and the
-three flow limits that together constitute the fix — the **business-flow automation harness** that
-runs the flow at volume and reconciles who ended up with the seats, the **vulnerable application**
-in all four of its shapes, and both **negative controls**.
-
-The whole demonstration is complete. Publication under MIT is the remaining slice.
+The demonstration is complete. It contains the **secure** application — the fictional venue, the
+two-step booking flow, self-service registration, and the three flow limits that together constitute
+the fix — the **business-flow automation harness** that runs the flow at volume and reconciles who
+ended up with the seats, the **vulnerable application** in all four of its shapes, both **negative
+controls**, and the **comparison CLI** that puts every scenario on one screen.
 
 The fastest way in is the walkthrough: **[`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md)**.
 
@@ -162,9 +160,10 @@ flow one entry may go on to consume.
 **It is not a race.** Run the identical automation at concurrency **1**, one identity, one source,
 paced deliberately *below* the enforced rate limit, and it still takes all 120 seats — just more
 slowly. Nothing in this demo depends on simultaneity, interleaving, or scheduling. Throttling
-changed how long the harm took and nothing else. The series' demonstration of the concurrency defect
-this class is repeatedly mistaken for is [`racejack`](https://github.com/maximalfocus/racejack)
-(CWE-367).
+changed how long the harm took and nothing else. The defect this class is repeatedly mistaken for is
+the check-then-act race (`CWE-367`) — the subject of a separate demonstration in this series,
+`racejack` — where simultaneity *is* the mechanism and serialising the requests is the fix. Here
+serialising them changes nothing at all.
 
 **It is not something a request-level control could have caught.** Every run ends by replaying its
 captured requests through a per-request validity check — authentication, authorization, schema,
@@ -236,9 +235,9 @@ venue-realistic ten minutes. The default in code is 600 seconds.
 ## What this is not
 
 - Not a concurrency demo. Nothing here depends on simultaneity, interleaving, or isolation; the
-  walkthrough is strictly sequential and every count is exactly reproducible. The demo of the
-  check-then-act race this class is repeatedly mistaken for is
-  [`racejack`](https://github.com/maximalfocus/racejack).
+  walkthrough is strictly sequential and every count is exactly reproducible. The check-then-act race
+  this class is repeatedly mistaken for (`CWE-367`) is a different defect with a different fix, and
+  is the subject of a separate demonstration in this series, `racejack`.
 - Not an attack tool. There is no credential guessing, wordlist, brute force, CAPTCHA solving,
   fingerprint spoofing, proxy rotation, or scraping capability here, and none is needed — every
   request in the demonstration is one the API is designed to accept.
@@ -297,3 +296,28 @@ slow-and-sequential   | per-source rate limit, stayed under | 1    | 1   | 120/1
 
 Read the last two data columns together. Six rows lost the entire allocation. Every row sent **zero**
 individually invalid requests.
+
+## Safety
+
+The **vulnerable** application is intentionally vulnerable local educational code and **must never be
+deployed**. It requires two deliberate actions to start — the `vulnerable` Compose profile plus
+`ALLOW_VULNERABLE_DEMO=true` — and the default Compose path never starts it; the secure application
+is the default. The network has **no egress**, no port is published to the host, containers run
+non-root with all capabilities dropped, `no-new-privileges`, and a read-only root filesystem, and
+every fixture — venue, show, performers, patrons, source labels, tokens — is wholly fictional and
+recreated from scratch on every run.
+
+There is no hosted service, no deployed endpoint, and no published image. This project makes no
+production-readiness, support, or compatibility claim.
+
+See [`SECURITY.md`](SECURITY.md) for what is intentionally vulnerable here versus how to report an
+*unintended* problem privately.
+
+## Contributing
+
+Contributions that improve the demonstration are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+The intentional vulnerability stays; everything remains fictional, local, and Compose-only.
+
+## License
+
+Released under the [MIT License](LICENSE).
