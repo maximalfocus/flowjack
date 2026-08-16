@@ -1,0 +1,77 @@
+# The only supported host workflow. The host needs Docker and nothing else.
+#
+# The network is `internal`, so no container here can reach anything outside this demo, and no
+# port is published to the host. The verification container runs *inside* the network and talks to
+# the application the way any client would.
+
+name: flowjack
+
+networks:
+  flowjack:
+    driver: bridge
+    internal: true
+
+x-hardening: &hardening
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+
+services:
+  # The secure application is the default service. It is the only application that exists.
+  secure-app:
+    <<: *hardening
+    build: .
+    image: flowjack:local
+    networks: [flowjack]
+    environment:
+      # Deliberately short so the walkthrough observes a real expiry inside its time budget
+      # instead of waiting out a venue-realistic window. See README.
+      FLOWJACK_HOLD_TTL_SECONDS: "3"
+    command:
+      - uvicorn
+      - flowjack.secure_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # One-shot verification: linters, types, the test suite, then the HTTP walkthrough against the
+  # running secure application. This is exactly what CI runs.
+  verify:
+    <<: *hardening
+    build: .
+    image: flowjack:local
+    networks: [flowjack]
+    depends_on:
+      secure-app:
+        condition: service_healthy
+    environment:
+      FLOWJACK_BASE_URL: "http://secure-app:8000"
+      FLOWJACK_HOLD_TTL_SECONDS: "3"
+      RUFF_CACHE_DIR: /tmp/ruff
+      MYPY_CACHE_DIR: /tmp/mypy
+    command:
+      - bash
+      - -euo
+      - pipefail
+      - -c
+      - |
+        echo "== ruff =="
+        ruff check .
+        ruff format --check .
+        echo "== mypy =="
+        mypy src tests
+        echo "== pytest =="
+        pytest -p no:cacheprovider
+        echo "== walkthrough (HTTP boundary) =="
+        python -m flowjack.walkthrough

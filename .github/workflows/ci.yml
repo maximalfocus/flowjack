@@ -1,0 +1,26 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # The same command a developer runs locally. The runner needs Docker and nothing else:
+      # Python, dependencies, linters, types, tests, and the walkthrough all run in containers.
+      - name: Verify through the Docker Compose boundary
+        run: bash scripts/verify.sh
