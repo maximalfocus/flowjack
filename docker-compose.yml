@@ -2,7 +2,11 @@
 #
 # The network is `internal`, so no container here can reach anything outside this demo, and no
 # port is published to the host. The verification container runs *inside* the network and talks to
-# the application the way any client would.
+# the applications the way any client would.
+#
+# Two identical secure instances run side by side. Each seeds its own fresh state at startup, so
+# the walkthrough and the harness each get an untouched 120-seat allocation and neither inherits
+# the other's leftovers. They are the same image and the same code; only their state differs.
 
 name: flowjack
 
@@ -20,33 +24,38 @@ x-hardening: &hardening
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=64m
 
-services:
-  # The secure application is the default service. It is the only application that exists.
-  secure-app:
-    <<: *hardening
-    build: .
-    image: flowjack:local
-    networks: [flowjack]
-    environment:
-      # Deliberately short so the walkthrough observes a real expiry inside its time budget
-      # instead of waiting out a venue-realistic window. See README.
-      FLOWJACK_HOLD_TTL_SECONDS: "3"
-    command:
-      - uvicorn
-      - flowjack.secure_app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-      start_period: 3s
+x-secure-app: &secure-app
+  <<: *hardening
+  build: .
+  image: flowjack:local
+  networks: [flowjack]
+  environment:
+    # Deliberately short so the walkthrough observes a real expiry inside its time budget
+    # instead of waiting out a venue-realistic window. See README.
+    FLOWJACK_HOLD_TTL_SECONDS: "3"
+  command:
+    - uvicorn
+    - flowjack.secure_app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+    start_period: 3s
 
-  # One-shot verification: linters, types, the test suite, then the HTTP walkthrough against the
-  # running secure application. This is exactly what CI runs.
+services:
+  # The secure application is the default. It is the only application that exists.
+  secure-app: *secure-app
+
+  # A second, identical instance, so the harness reconciles a fresh allocation.
+  secure-app-harness: *secure-app
+
+  # One-shot verification: linters, types, the test suite, the HTTP walkthrough, and the
+  # business-flow automation harness. This is exactly what CI runs.
   verify:
     <<: *hardening
     build: .
@@ -54,6 +63,8 @@ services:
     networks: [flowjack]
     depends_on:
       secure-app:
+        condition: service_healthy
+      secure-app-harness:
         condition: service_healthy
     environment:
       FLOWJACK_BASE_URL: "http://secure-app:8000"
@@ -75,3 +86,11 @@ services:
         pytest -p no:cacheprovider
         echo "== walkthrough (HTTP boundary) =="
         python -m flowjack.walkthrough
+        echo "== harness (business flow at volume, secure application) =="
+        python -m flowjack.harness \
+          --base-url http://secure-app-harness:8000 \
+          --expect "flow limit held" \
+          --transcript-path /tmp/flowjack-harness.txt
+        echo "-- transcript artifact --"
+        head -1 /tmp/flowjack-harness.txt
+        echo "   ($(wc -l < /tmp/flowjack-harness.txt) lines)"
