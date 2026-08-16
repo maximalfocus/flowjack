@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 class RegistrationRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
-    eligibility_ref: str = Field(min_length=1, max_length=64)
+    eligibility_ref: str | None = Field(default=None, max_length=64)
 
 
 class RegistrationResponse(BaseModel):

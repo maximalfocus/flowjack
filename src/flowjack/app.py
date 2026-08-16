@@ -25,6 +25,7 @@ from flowjack.db import Database
 from flowjack.errors import REFUSAL_DETAIL, REFUSAL_STATUS, FlowLimitRefusedError
 from flowjack.flow import confirm_hold, place_hold, register_patron
 from flowjack.limits import expire_due_holds
+from flowjack.policy import SECURE, Policy
 from flowjack.schemas import (
     AllocationResponse,
     HoldResponse,
@@ -41,19 +42,23 @@ def create_app(
     settings: Settings | None = None,
     clock: Clock | None = None,
     database: Database | None = None,
+    policy: Policy = SECURE,
 ) -> FastAPI:
     resolved_settings = settings if settings is not None else load_settings()
     resolved_clock = clock if clock is not None else SystemClock()
     db = database if database is not None else Database(resolved_settings, resolved_clock)
 
+    variant = "VULNERABLE" if policy.is_vulnerable else "SECURE"
     app = FastAPI(
-        title="flowjack — secure application",
+        title=f"flowjack — {policy.name} application",
         description=(
             "Local educational demo of unrestricted access to sensitive business flows "
-            "(API6:2023 / CWE-840). This is the SECURE variant."
+            f"(API6:2023 / CWE-840). This is the {variant} variant "
+            f"under policy {policy.name!r}."
         ),
         version="0.1.0",
     )
+    app.state.policy = policy
     app.state.settings = resolved_settings
     app.state.clock = resolved_clock
     app.state.db = db
@@ -97,6 +102,7 @@ def create_app(
                 display_name=body.display_name,
                 eligibility_ref=body.eligibility_ref,
                 settings=resolved_settings,
+                policy=policy,
                 now=resolved_clock.now(),
             )
         return RegistrationResponse(
@@ -114,6 +120,7 @@ def create_app(
                 patron=patron,
                 show_id=show_id,
                 settings=resolved_settings,
+                policy=policy,
                 now=resolved_clock.now(),
             )
         return HoldResponse(
@@ -127,7 +134,13 @@ def create_app(
     @app.post("/holds/{hold_id}/confirm", response_model=TicketResponse, status_code=201)
     def post_confirm(hold_id: str, patron: Patron = Depends(current_patron)) -> TicketResponse:
         with db.transaction() as conn:
-            result = confirm_hold(conn, patron=patron, hold_id=hold_id, now=resolved_clock.now())
+            result = confirm_hold(
+                conn,
+                patron=patron,
+                hold_id=hold_id,
+                policy=policy,
+                now=resolved_clock.now(),
+            )
         return TicketResponse(
             ticket_id=result.ticket_id,
             hold_id=result.hold_id,

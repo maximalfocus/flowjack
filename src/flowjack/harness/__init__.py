@@ -5,17 +5,20 @@ run many times. This package runs the flow, records every request, and reconcile
 has left against who took it.
 """
 
-from flowjack.harness.engine import HarnessConfig, HarnessResult, run_harness
+from flowjack.harness.engine import HarnessConfig, HarnessResult, Mode, run_harness
 from flowjack.harness.ledger import VERDICT_ABSENT, VERDICT_HELD, Ledger, build_ledger
 from flowjack.harness.records import Actor, Outcome, RequestRecord, Step
+from flowjack.harness.scenarios import SCENARIOS
 
 __all__ = [
+    "SCENARIOS",
     "VERDICT_ABSENT",
     "VERDICT_HELD",
     "Actor",
     "HarnessConfig",
     "HarnessResult",
     "Ledger",
+    "Mode",
     "Outcome",
     "RequestRecord",
     "Step",

@@ -10,13 +10,15 @@ import argparse
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 
 from flowjack.config import SHOW_ID, load_settings
-from flowjack.harness.engine import HarnessConfig, run_harness
+from flowjack.harness.engine import run_harness
 from flowjack.harness.ledger import VERDICT_ABSENT, VERDICT_HELD
+from flowjack.harness.scenarios import SCENARIOS
 from flowjack.harness.transcript import render
 
 
@@ -39,18 +41,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-url", default=os.environ.get("FLOWJACK_BASE_URL", "http://secure-app:8000")
     )
+    parser.add_argument(
+        "--scenario",
+        choices=sorted(SCENARIOS),
+        default="secure-baseline",
+        help="named run parameters; see flowjack.harness.scenarios",
+    )
     parser.add_argument("--show-id", default=SHOW_ID)
-    parser.add_argument("--operator-identities", type=int, default=60)
-    parser.add_argument("--operator-seats-per-identity", type=int, default=4)
-    parser.add_argument("--genuine-patrons", type=int, default=40)
-    parser.add_argument("--genuine-seats-each", type=int, default=2)
+    parser.add_argument("--operator-identities", type=int, default=None)
+    parser.add_argument("--operator-seats-per-identity", type=int, default=None)
+    parser.add_argument("--genuine-patrons", type=int, default=None)
+    parser.add_argument("--genuine-seats-each", type=int, default=None)
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=8,
+        default=None,
         help="threads used to shorten the run; not part of the demonstrated mechanism",
     )
-    parser.add_argument("--pace-seconds", type=float, default=0.0)
+    parser.add_argument("--pace-seconds", type=float, default=None)
+    parser.add_argument("--abandon-rounds", type=int, default=None)
+    parser.add_argument("--abandon-wait-seconds", type=float, default=None)
     parser.add_argument(
         "--expect",
         choices=[VERDICT_HELD, VERDICT_ABSENT],
@@ -64,15 +74,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = HarnessConfig(
-        show_id=args.show_id,
-        operator_identities=args.operator_identities,
-        operator_seats_per_identity=args.operator_seats_per_identity,
-        genuine_patrons=args.genuine_patrons,
-        genuine_seats_each=args.genuine_seats_each,
-        concurrency=args.concurrency,
-        pace_seconds=args.pace_seconds,
-    )
+    overrides = {
+        name: value
+        for name, value in (
+            ("show_id", args.show_id),
+            ("operator_identities", args.operator_identities),
+            ("operator_seats_per_identity", args.operator_seats_per_identity),
+            ("genuine_patrons", args.genuine_patrons),
+            ("genuine_seats_each", args.genuine_seats_each),
+            ("concurrency", args.concurrency),
+            ("pace_seconds", args.pace_seconds),
+            ("abandon_rounds", args.abandon_rounds),
+            ("abandon_wait_seconds", args.abandon_wait_seconds),
+        )
+        if value is not None
+    }
+    config = replace(SCENARIOS[args.scenario], **overrides)
 
     with httpx.Client(base_url=args.base_url, timeout=30.0) as client:
         _wait_for_health(client)

@@ -1,12 +1,15 @@
 # The only supported host workflow. The host needs Docker and nothing else.
 #
 # The network is `internal`, so no container here can reach anything outside this demo, and no
-# port is published to the host. The verification container runs *inside* the network and talks to
-# the applications the way any client would.
+# port is published to the host. Verification containers run *inside* the network and talk to the
+# applications the way any client would.
 #
-# Two identical secure instances run side by side. Each seeds its own fresh state at startup, so
-# the walkthrough and the harness each get an untouched 120-seat allocation and neither inherits
-# the other's leftovers. They are the same image and the same code; only their state differs.
+# Several identical instances of an application run side by side. Each seeds its own fresh state at
+# startup, so every scenario reconciles an untouched 120-seat allocation instead of inheriting the
+# previous one's leftovers. Same image, same code — only their state differs.
+#
+# The deliberately vulnerable application is behind the `vulnerable` profile AND requires
+# ALLOW_VULNERABLE_DEMO=true. Both are required; neither alone starts it.
 
 name: flowjack
 
@@ -24,6 +27,13 @@ x-hardening: &hardening
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=64m
 
+x-healthcheck: &healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+  interval: 3s
+  timeout: 3s
+  retries: 20
+  start_period: 3s
+
 x-secure-app: &secure-app
   <<: *hardening
   build: .
@@ -40,22 +50,40 @@ x-secure-app: &secure-app
     - 0.0.0.0
     - --port
     - "8000"
-  healthcheck:
-    test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
-    interval: 3s
-    timeout: 3s
-    retries: 20
-    start_period: 3s
+  healthcheck: *healthcheck
+
+# Started only with `--profile vulnerable` *and* ALLOW_VULNERABLE_DEMO=true. The entry point is a
+# uvicorn factory, so the acknowledgement is checked when the server builds the application: the
+# container exits non-zero without it.
+x-vulnerable-app: &vulnerable-app
+  <<: *hardening
+  build: .
+  image: flowjack:local
+  profiles: [vulnerable]
+  networks: [flowjack]
+  environment:
+    FLOWJACK_HOLD_TTL_SECONDS: "3"
+    ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+  command:
+    - uvicorn
+    - flowjack.vulnerable_app:create_vulnerable_app
+    - --factory
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+  healthcheck: *healthcheck
 
 services:
-  # The secure application is the default. It is the only application that exists.
+  # The secure application is the default. It is the only application the default path starts.
   secure-app: *secure-app
-
-  # A second, identical instance, so the harness reconciles a fresh allocation.
   secure-app-harness: *secure-app
 
-  # One-shot verification: linters, types, the test suite, the HTTP walkthrough, and the
-  # business-flow automation harness. This is exactly what CI runs.
+  vulnerable-app: *vulnerable-app
+  vulnerable-app-abandon: *vulnerable-app
+
+  # One-shot verification of the secure side: linters, types, the test suite, the HTTP
+  # walkthrough, and the automation harness.
   verify:
     <<: *hardening
     build: .
@@ -86,11 +114,44 @@ services:
         pytest -p no:cacheprovider
         echo "== walkthrough (HTTP boundary) =="
         python -m flowjack.walkthrough
-        echo "== harness (business flow at volume, secure application) =="
+        echo "== harness: secure baseline =="
         python -m flowjack.harness \
           --base-url http://secure-app-harness:8000 \
+          --scenario secure-baseline \
           --expect "flow limit held" \
-          --transcript-path /tmp/flowjack-harness.txt
+          --transcript-path /tmp/flowjack-secure.txt
         echo "-- transcript artifact --"
-        head -1 /tmp/flowjack-harness.txt
-        echo "   ($(wc -l < /tmp/flowjack-harness.txt) lines)"
+        head -1 /tmp/flowjack-secure.txt
+        echo "   ($(wc -l < /tmp/flowjack-secure.txt) lines)"
+
+  # One-shot verification of the vulnerable side. Reaching this needs both opt-in actions.
+  verify-vulnerable:
+    <<: *hardening
+    build: .
+    image: flowjack:local
+    profiles: [vulnerable]
+    networks: [flowjack]
+    depends_on:
+      vulnerable-app:
+        condition: service_healthy
+      vulnerable-app-abandon:
+        condition: service_healthy
+    environment:
+      ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+    command:
+      - bash
+      - -euo
+      - pipefail
+      - -c
+      - |
+        echo "== harness: no anti-automation (FR-012) =="
+        python -m flowjack.harness \
+          --base-url http://vulnerable-app:8000 \
+          --scenario no-anti-automation \
+          --expect "flow limit absent"
+        echo "== harness: abandoned holds (FR-013) =="
+        python -m flowjack.harness \
+          --base-url http://vulnerable-app-abandon:8000 \
+          --scenario abandoned-holds \
+          --abandon-wait-seconds 4 \
+          --expect "flow limit absent"
