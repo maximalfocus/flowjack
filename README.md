@@ -23,11 +23,12 @@ green test suite says nothing about it.
 ## What is here today
 
 This repository is being delivered slice by slice. Right now it contains the **secure**
-application: the fictional venue, the two-step booking flow, self-service registration, and the
-three flow limits that together constitute the fix.
+application — the fictional venue, the two-step booking flow, self-service registration, and the
+three flow limits that together constitute the fix — plus the **business-flow automation harness**
+that runs the flow at volume and reconciles who ended up with the seats.
 
-The vulnerable variants — the ladder of controls that *look* like fixes and are not — and the
-automation harness that drives them arrive in later slices.
+The vulnerable variants — the ladder of controls that *look* like fixes and are not — arrive in a
+later slice.
 
 ## The fixture
 
@@ -70,6 +71,35 @@ Every refusal — sold out, entitlement used, flow not entered, identity supply 
 **same** status and the **same** body. A caller who could tell them apart would have an oracle for
 the venue's remaining stock and for exactly where each limit sits.
 
+## The automation harness
+
+No single request exposes this defect, so the unit of observation has to be the aggregate outcome
+of the flow run many times. The harness runs it, records every request, and asks the venue what is
+left. Against the secure application it reports:
+
+```
+  seats to the AUTOMATED actor : 6  (5.0% of the allocation)
+    its documented ceiling     : 6
+    identities it used         : 3
+
+  seats to GENUINE patrons     : 80
+    demand offered vs served   : 80 vs 80
+
+  requests issued              : 238
+    status distribution        : 201x175  409x63
+    individually INVALID       : 0
+
+  VERDICT                      : flow limit held
+```
+
+Read the last two numbers together, because that pairing *is* the lesson: sixty-three requests were
+refused and **not one of them was invalid**. There is no malformed body, no failed signature, no
+authorization error — nothing a scanner or a request-level rule could key on. What refused them was
+a limit on the flow's outcome, which is the only thing that could have.
+
+Volume, pace, and concurrency are run parameters, not the mechanism. Concurrency exists purely to
+shorten the run: the same counts come out at concurrency 1, and the test suite asserts exactly that.
+
 ## Run it
 
 The host needs **Docker and nothing else** — no Python, no database, no configuration:
@@ -79,8 +109,12 @@ bash scripts/verify.sh
 ```
 
 That brings up the secure application on a hermetic, egress-less network, runs the linters, the
-type checker, and the test suite, then drives the HTTP walkthrough against the running service from
-*inside* that network, and tears everything down. GitHub Actions runs the identical command.
+type checker, and the test suite, then drives the HTTP walkthrough and the automation harness
+against running services from *inside* that network, and tears everything down. GitHub Actions runs
+the identical command.
+
+Two identical secure instances run side by side so the walkthrough and the harness each get an
+untouched 120-seat allocation. Same image, same code — only their state differs.
 
 No port is published to the host. Nothing persists between runs: fixtures are recreated from
 scratch every time and the database is in memory.
@@ -119,5 +153,11 @@ src/flowjack/
   app.py          the application factory
   secure_app.py   the secure ASGI entry point
   walkthrough.py  the HTTP walkthrough
+  harness/
+    fixtures.py   the fixed, checked-in identities and source labels
+    records.py    one record per request, and what the application did with it
+    engine.py     the flow run at volume — a callable, tested directly
+    ledger.py     who ended up with the seats, and the flow-limit verdict
+    transcript.py the run artifact
 tests/            in-process tests over the real HTTP surface, on a controllable clock
 ```
