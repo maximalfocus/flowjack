@@ -34,3 +34,12 @@ docker compose run --rm verify
 echo
 echo "### phase 2 — vulnerable application (opt-in profile + explicit acknowledgement)"
 ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable run --rm verify-vulnerable
+
+echo
+echo "### phase 3 — every scenario side by side"
+# Phases 1 and 2 drained these allocations. Each container reseeds its own in-memory database at
+# startup, so restarting them is how the comparison gets a fresh 120 seats for every row.
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable restart \
+  secure-app-harness vulnerable-app vulnerable-app-abandon vulnerable-app-rate-limit \
+  vulnerable-app-quota vulnerable-app-gate vulnerable-app-sequential
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable run --rm verify-compare
