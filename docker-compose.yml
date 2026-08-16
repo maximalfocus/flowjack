@@ -211,3 +211,43 @@ services:
           --base-url http://vulnerable-app-sequential:8000 \
           --scenario slow-and-sequential \
           --expect "flow limit absent"
+
+  # The comparison runs every scenario at once, so it needs every application at fresh state.
+  # scripts/verify.sh restarts them immediately before invoking this — each container reseeds its
+  # own in-memory database at startup, so a restart is a clean allocation.
+  verify-compare:
+    <<: *hardening
+    build: .
+    image: flowjack:local
+    profiles: [vulnerable]
+    networks: [flowjack]
+    depends_on:
+      secure-app-harness:
+        condition: service_healthy
+      vulnerable-app:
+        condition: service_healthy
+      vulnerable-app-abandon:
+        condition: service_healthy
+      vulnerable-app-rate-limit:
+        condition: service_healthy
+      vulnerable-app-quota:
+        condition: service_healthy
+      vulnerable-app-gate:
+        condition: service_healthy
+      vulnerable-app-sequential:
+        condition: service_healthy
+    environment:
+      ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+    command:
+      - bash
+      - -euo
+      - pipefail
+      - -c
+      - |
+        echo "== comparison: every scenario, side by side =="
+        python -m flowjack.compare \
+          --require-contrast \
+          --transcript-path /tmp/flowjack-compare.txt
+        echo "-- comparison artifact --"
+        head -1 /tmp/flowjack-compare.txt
+        echo "   ($(wc -l < /tmp/flowjack-compare.txt) lines)"

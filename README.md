@@ -28,7 +28,9 @@ three flow limits that together constitute the fix — the **business-flow autom
 runs the flow at volume and reconciles who ended up with the seats, the **vulnerable application**
 in all four of its shapes, and both **negative controls**.
 
-The comparison CLI and the educational walkthrough arrive in a later slice.
+The whole demonstration is complete. Publication under MIT is the remaining slice.
+
+The fastest way in is the walkthrough: **[`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md)**.
 
 ## The fixture
 
@@ -263,6 +265,7 @@ src/flowjack/
   secure_app.py   the secure ASGI entry point
   vulnerable_app.py  the gated vulnerable entry point (two opt-in actions)
   walkthrough.py  the HTTP walkthrough
+  compare/        every scenario, side by side, on one screen
   harness/
     fixtures.py   the fixed, checked-in identities and source labels
     records.py    one record per request, and what the application did with it
@@ -272,4 +275,25 @@ src/flowjack/
     validity.py   the request-level validity replay
     transcript.py the run artifact
 tests/            in-process tests over the real HTTP surface, on a controllable clock
+docs/
+  WALKTHROUGH.md  the full explanation: the ladder, both boundaries, and the fix
 ```
+
+## The whole thing on one screen
+
+```
+$ python -m flowjack.compare
+
+scenario              | control in force                    | conc | ids | operator | genuine | invalid | verdict
+----------------------+-------------------------------------+------+-----+----------+---------+---------+-----------
+secure-baseline       | all three flow limits               | 8    | 3   | 6/120    | 80      | 0       | SECURE
+no-anti-automation    | none                                | 8    | 1   | 120/120  | 0       | 0       | VULNERABLE
+abandoned-holds       | none (holds abandoned)              | 8    | 1   | 120/120  | 0       | 0       | VULNERABLE
+per-source-rate-limit | per-source rate limit               | 8    | 8   | 120/120  | 0       | 0       | VULNERABLE
+per-account-quota     | per-account quota (2 seats)         | 8    | 60  | 120/120  | 0       | 0       | VULNERABLE
+front-door-gate       | verification gate at the front door | 8    | 1   | 120/120  | 0       | 0       | VULNERABLE
+slow-and-sequential   | per-source rate limit, stayed under | 1    | 1   | 120/120  | 0       | 0       | VULNERABLE
+```
+
+Read the last two data columns together. Six rows lost the entire allocation. Every row sent **zero**
+individually invalid requests.
